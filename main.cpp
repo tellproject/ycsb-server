@@ -24,6 +24,7 @@
 #include <array>
 #include <unordered_map>
 #include <unordered_set>
+#include <thread>
 
 #include <boost/asio.hpp>
 #include <boost/lexical_cast.hpp>
@@ -386,6 +387,7 @@ void accept(io_service& service, ip::tcp::acceptor& acceptor, tell::store::Clien
 int main(int argc, const char* argv[]) {
     using namespace crossbow::program_options;
     bool help = false;
+    bool createTable = false;
     std::string host("0.0.0.0");
     std::string port("8713");
     crossbow::string logLevel("DEBUG");
@@ -398,6 +400,7 @@ int main(int argc, const char* argv[]) {
             value<'p'>("port", &port, tag::description{"Port to bind to"}),
             value<'l'>("log-level", &logLevel, tag::description{"The log level"}),
             value<'c'>("commit-manager", &commitManager, tag::description{"Address to the commit manager"}),
+            value<'C'>("create-table", &createTable, tag::description{"Client should create table on startup"}),
             value<'s'>("storage-nodes", &storageNodes, tag::description{"Semicolon-separated list of storage node addresses"}),
             value<-1>("network-threads", &config.numNetworkThreads, tag::ignore_short<true>{})
             );
@@ -418,6 +421,27 @@ int main(int argc, const char* argv[]) {
     config.commitManager = config.parseCommitManager(commitManager);
     config.tellStore = config.parseTellStore(storageNodes);
     tell::store::ClientManager<void> clientManager(config);
+
+    if (createTable) {
+        bool done = false;
+        clientManager.execute([&done](tell::store::ClientHandle& handle) {
+            tell::store::Schema schema;
+            schema.addField(tell::store::FieldType::TEXT, "field0", true);
+            schema.addField(tell::store::FieldType::TEXT, "field1", true);
+            schema.addField(tell::store::FieldType::TEXT, "field2", true);
+            schema.addField(tell::store::FieldType::TEXT, "field3", true);
+            schema.addField(tell::store::FieldType::TEXT, "field4", true);
+            schema.addField(tell::store::FieldType::TEXT, "field5", true);
+            schema.addField(tell::store::FieldType::TEXT, "field6", true);
+            schema.addField(tell::store::FieldType::TEXT, "field7", true);
+            schema.addField(tell::store::FieldType::TEXT, "field8", true);
+            schema.addField(tell::store::FieldType::TEXT, "field9", true);
+            done = true;
+        });
+        while (!done) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
 
     // initialize boost::asio
     boost::asio::io_service service;
