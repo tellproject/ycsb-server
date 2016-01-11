@@ -101,6 +101,7 @@ struct ResultWriter {
         std::unique_ptr<char[]> nData(new char[size + 1024]);
         memcpy(nData.get(), data.get(), size);
         nData.swap(data);
+        size += 1024;
     }
 
     void write(size_t sz, const char* str) {
@@ -200,7 +201,20 @@ private: // commands
             auto& rec = tId.record();
 
             ResultWriter result(1024);
-            result.write(int32_t(fields.size()));
+            if (fields.empty()) {
+                auto& fields = rec.schema().varSizeFields();
+                result.write(fields.size());
+                tell::store::GenericTuple tuple;
+                for (unsigned short i = 0; i < fields.size(); ++i) {
+                    result.write(fields[i].name());
+                    bool isNull;
+                    tell::store::FieldType type;
+                    const char* str = rec.data(res->data(), i, isNull, &type);
+                    result.write(str);
+                }
+            } else {
+                result.write(int32_t(fields.size()));
+            }
             for (auto& field : fields) {
                 result.write(field);
                 unsigned short fId;
@@ -239,13 +253,11 @@ private: // commands
             uint64_t key = boost::lexical_cast<uint64_t>(keyStr.substr(self->mPrefixLength));
             auto values = self->getMap(offset);
             auto tId = self->tableId(tableName, handle);
-            auto r = handle.insert(tId, key, std::numeric_limits<uint64_t>::max(), values);
+            auto r = handle.insert(tId, key, uint64_t(1), values);
             r->wait();
             self->mSocket.get_io_service().post([self](){
-                char* res = new char[1];
-                res[0] = 0;
-                async_write(self->socket(), buffer(res, 1), [self, res](const error_code& ec, size_t) {
-                    delete[] res;
+                self->mClientBuffer.buffer[0] = 0;
+                async_write(self->socket(), buffer(self->mClientBuffer.buffer.get(), 1), [self](const error_code& ec, size_t) {
                     if (ec) {
                         LOG_ERROR(ec.message());
                         return;
@@ -260,7 +272,7 @@ private: // commands
         auto self = shared_from_this();
         mClientManager.execute([self](tell::store::ClientHandle& handle) {
             size_t offset = 2*sizeof(int32_t);
-            char errcode = 1;
+            char errcode = 0;
             auto tableName = self->getString(offset);
             auto keyStr = self->getString(offset);
             uint64_t key = boost::lexical_cast<uint64_t>(keyStr.substr(self->mPrefixLength));
@@ -273,6 +285,7 @@ private: // commands
                 errcode = 2;
             } else {
                 auto res = resF->get();
+                auto version = res->version();
                 auto& rec = tId.record();
                 auto& fields = rec.schema().varSizeFields();
                 tell::store::GenericTuple tuple;
@@ -285,14 +298,12 @@ private: // commands
                                 crossbow::string(str + sizeof(int32_t), *reinterpret_cast<const int32_t*>(str)));
                     }
                 }
-                auto r = handle.update(tId, key, std::numeric_limits<uint64_t>::max(), values);
+                auto r = handle.update(tId, key, version + 1, values);
                 r->wait();
             }
             self->mSocket.get_io_service().post([self, errcode](){
-                char* res = new char[1];
-                res[0] = errcode;
-                async_write(self->socket(), buffer(res, 1), [self, res](const error_code& ec, size_t) {
-                    delete[] res;
+                self->mClientBuffer.buffer[0] = errcode;
+                async_write(self->socket(), buffer(self->mClientBuffer.buffer.get(), 1), [self](const error_code& ec, size_t) {
                     if (ec) {
                         LOG_ERROR(ec.message());
                         return;
@@ -312,13 +323,13 @@ private: // commands
             uint64_t key = boost::lexical_cast<uint64_t>(keyStr.substr(self->mPrefixLength));
 
             auto tId = self->tableId(tableName, handle);
-            auto resp = handle.remove(tId, key, std::numeric_limits<uint64_t>::max());
+            auto resF = handle.get(tId, key);
+            auto tuple = resF->get();
+            auto resp = handle.remove(tId, key, tuple->version() + 1);
             resp->wait();
             self->mSocket.get_io_service().post([self](){
-                char* res = new char[1];
-                res[0] = 0;
-                async_write(self->socket(), buffer(res, 1), [self, res](const error_code& ec, size_t) {
-                    delete[] res;
+                self->mClientBuffer.buffer[0] = 1;
+                async_write(self->socket(), buffer(self->mClientBuffer.buffer.get(), 1), [self](const error_code& ec, size_t) {
                     if (ec) {
                         LOG_ERROR(ec.message());
                         return;
