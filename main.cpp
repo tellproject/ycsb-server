@@ -53,8 +53,9 @@ struct ClientBuffer {
     std::unique_ptr<char[]> buffer;
     size_t size;
 
-    ClientBuffer(size_t size)
-        : buffer(new char[size])
+    ClientBuffer(size_t sz)
+        : buffer(new char[sz])
+        , size(sz)
     {}
 
     void grow() {
@@ -75,7 +76,7 @@ void read_all(size_t reqSize, size_t bt, size_t readTo, Client& client, Fun f) {
     if (readTo + reqSize < clientBuffer.size) {
         clientBuffer.grow();
     }
-    async_read(client.socket(), buffer(clientBuffer.buffer.get() + bt, clientBuffer.size - bt),
+    client.socket().async_read_some(buffer(clientBuffer.buffer.get() + bt, clientBuffer.size - bt),
             [reqSize, bt, readTo, &client, f](const error_code& ec, size_t numBytes){
         if (ec) {
             f(ec, numBytes + bt, readTo);
@@ -259,6 +260,7 @@ private: // commands
         auto self = shared_from_this();
         mClientManager.execute([self](tell::store::ClientHandle& handle) {
             size_t offset = 2*sizeof(int32_t);
+            char errcode = 1;
             auto tableName = self->getString(offset);
             auto keyStr = self->getString(offset);
             uint64_t key = boost::lexical_cast<uint64_t>(keyStr.substr(self->mPrefixLength));
@@ -266,24 +268,29 @@ private: // commands
             auto values = self->getMap(offset);
             auto tId = self->tableId(tableName, handle);
             auto resF = handle.get(tId, key);
-            auto res = resF->get();
-            auto& rec = tId.record();
-            auto& fields = rec.schema().varSizeFields();
-            tell::store::GenericTuple tuple;
-            for (unsigned short i = 0; i < fields.size(); ++i) {
-                if (values.count(fields[i].name()) == 0) {
-                    bool isNull;
-                    tell::store::FieldType type;
-                    const char* str = rec.data(res->data(), i, isNull, &type);
-                    values.emplace(fields[i].name(),
-                            crossbow::string(str + sizeof(int32_t), *reinterpret_cast<const int32_t*>(str)));
+            auto e = resF->error();
+            if (e) {
+                errcode = 2;
+            } else {
+                auto res = resF->get();
+                auto& rec = tId.record();
+                auto& fields = rec.schema().varSizeFields();
+                tell::store::GenericTuple tuple;
+                for (unsigned short i = 0; i < fields.size(); ++i) {
+                    if (values.count(fields[i].name()) == 0) {
+                        bool isNull;
+                        tell::store::FieldType type;
+                        const char* str = rec.data(res->data(), i, isNull, &type);
+                        values.emplace(fields[i].name(),
+                                crossbow::string(str + sizeof(int32_t), *reinterpret_cast<const int32_t*>(str)));
+                    }
                 }
+                auto r = handle.update(tId, key, std::numeric_limits<uint64_t>::max(), values);
+                r->wait();
             }
-            auto r = handle.update(tId, key, std::numeric_limits<uint64_t>::max(), values);
-            r->wait();
-            self->mSocket.get_io_service().post([self](){
+            self->mSocket.get_io_service().post([self, errcode](){
                 char* res = new char[1];
-                res[0] = 0;
+                res[0] = errcode;
                 async_write(self->socket(), buffer(res, 1), [self, res](const error_code& ec, size_t) {
                     delete[] res;
                     if (ec) {
@@ -340,7 +347,8 @@ public:
 
     void read() {
         auto self = shared_from_this();
-        async_read(mSocket, buffer(mClientBuffer.buffer.get(), mClientBuffer.size), [self](const error_code& ec, size_t bt){
+        mSocket.async_read_some(buffer(mClientBuffer.buffer.get(),
+                    mClientBuffer.size), [self](const error_code& ec, size_t bt){
             if (ec) {
                 LOG_ERROR(ec.message());
                 return;
@@ -425,7 +433,7 @@ int main(int argc, const char* argv[]) {
     if (createTable) {
         bool done = false;
         clientManager.execute([&done](tell::store::ClientHandle& handle) {
-            tell::store::Schema schema;
+            tell::store::Schema schema(tell::store::TableType::NON_TRANSACTIONAL);
             schema.addField(tell::store::FieldType::TEXT, "field0", true);
             schema.addField(tell::store::FieldType::TEXT, "field1", true);
             schema.addField(tell::store::FieldType::TEXT, "field2", true);
@@ -436,6 +444,7 @@ int main(int argc, const char* argv[]) {
             schema.addField(tell::store::FieldType::TEXT, "field7", true);
             schema.addField(tell::store::FieldType::TEXT, "field8", true);
             schema.addField(tell::store::FieldType::TEXT, "field9", true);
+            handle.createTable("usertable", schema);
             done = true;
         });
         while (!done) {
